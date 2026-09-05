@@ -1,0 +1,136 @@
+name: Build APK
+run-name: Code2APK-${{ inputs.build_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: Build job id
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Prepare Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          JOB="jobs/${{ inputs.build_id }}.zip"
+
+          if [ ! -f "$JOB" ]; then
+            echo "Build job not found: $JOB"
+            exit 1
+          fi
+
+          mkdir -p buildsrc
+          unzip -q "$JOB" -d buildsrc
+
+          if [ ! -f buildsrc/meta.json ]; then
+            echo "meta.json missing"
+            exit 1
+          fi
+
+          if [ ! -f buildsrc/www/index.html ]; then
+            echo "index.html missing"
+            exit 1
+          fi
+
+          APP_NAME="$(node -p "require('./buildsrc/meta.json').appName")"
+          APP_ID="$(node -p "require('./buildsrc/meta.json').appId")"
+
+          mkdir capapp
+          cd capapp
+
+          npm init -y
+
+          npm install \
+            @capacitor/core \
+            @capacitor/cli \
+            @capacitor/android \
+            @capacitor/assets
+
+          cp -R ../buildsrc/www ./www
+
+          mkdir -p assets
+
+          if [ -f ../buildsrc/assets/icon.png ]; then
+            cp ../buildsrc/assets/icon.png assets/icon.png
+          fi
+
+          if [ -f ../buildsrc/assets/icon.jpg ]; then
+            cp ../buildsrc/assets/icon.jpg assets/icon.jpg
+          fi
+
+          cat > capacitor.config.json <<EOF
+          {
+            "appId": "$APP_ID",
+            "appName": "$APP_NAME",
+            "webDir": "www"
+          }
+          EOF
+
+          npx cap add android
+          npx cap sync android
+
+          if [ -f assets/icon.png ] || [ -f assets/icon.jpg ]; then
+            npx @capacitor/assets generate --android || true
+          fi
+
+      - name: Build real Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd capapp/android
+
+          chmod +x gradlew
+
+          ./gradlew assembleDebug
+
+      - name: Find APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p output
+
+          APK="$(find capapp/android/app/build/outputs/apk/debug -name '*.apk' -type f | head -n 1)"
+
+          if [ -z "$APK" ]; then
+            echo "APK file not found"
+            exit 1
+          fi
+
+          cp "$APK" "output/app-${{ inputs.build_id }}.apk"
+
+          ls -lh output
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ inputs.build_id }}
+          path: output/*.apk
+          if-no-files-found: error
+          retention-days: 3
